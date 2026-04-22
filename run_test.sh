@@ -1,0 +1,3 @@
+PYTHONPATH=. pytest
+
+pytest tests
