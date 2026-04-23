@@ -423,7 +423,7 @@ class PlasticTransfer:
             json.dump(skills_data, f, indent=2)
 
         # -------------------------
-        # 3. MemoryBank (solo data)
+        # 3. MemoryBank (only data)
         # -------------------------
         with open(f"{path}/memory.json", "w") as f:
             json.dump(serialize_memory(self.memory_bank.get_all()), f)

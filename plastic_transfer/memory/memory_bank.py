@@ -55,7 +55,7 @@ class MemoryBank:
                     "metadata": item["metadata"]
                 })
 
-        # ordenar por similitud
+        # order by similarity
         results.sort(key=lambda x: x["similarity"], reverse=True)
 
         return results[:k]

@@ -23,20 +23,20 @@ class Cortex:
         for s in all_skills:
             score = self._score_skill_context(s, obs_dict)
 
-            if score > 0.1:  # 🔥 threshold low
+            if score > 0.1:  # threshold low
                 scored_skills.append((s, score))
 
         # ordenar por relevancia
         scored_skills.sort(key=lambda x: x[1], reverse=True)
 
-        # solo top relevantes
+        # only top skills
         active_skills = [s for s, _ in scored_skills[:10]]
 
         if not active_skills:
             return []
 
         # -----------------------------------
-        # 2. memoria
+        # 2. memory
         # -----------------------------------
         similar = self.memory_bank.query(
             embedding,
@@ -76,7 +76,7 @@ class Cortex:
             })
 
         # -----------------------------------
-        # 5. ordenar
+        # 5. order
         # -----------------------------------
         candidates.sort(key=lambda x: x["score"], reverse=True)
 
