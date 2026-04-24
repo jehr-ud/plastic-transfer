@@ -26,7 +26,7 @@ class Cortex:
             if score > 0.1:  # threshold low
                 scored_skills.append((s, score))
 
-        # ordenar por relevancia
+        # order by relevance
         scored_skills.sort(key=lambda x: x[1], reverse=True)
 
         # only top skills
@@ -95,10 +95,10 @@ class Cortex:
                 for c in control:
                     combos.append([p, pl, c])
 
-        return combos[:5]  # limitar
+        return combos[:5]  # limit
 
     def _score_memory(self, memory_item, combo):
-        # usa reward pasado + similitud
+        # past reward + similarity
         sim = memory_item.get("similarity", 0.0)
         reward = memory_item.get("reward", 0.0)
 
@@ -107,15 +107,18 @@ class Cortex:
     def _score_heuristic(self, combo, obs_dict):
         score = 0.0
 
-        alignment = obs_dict.get("alignment", 0.0)
-        dist = obs_dict.get("dist", 1.0)
+        for skill in combo:
+            for inp in skill.inputs:
+                key = inp.get("key")
+                weight = inp.get("score", 0.0)
 
-        # favorece avanzar
-        score += alignment * 0.5
-        score += (1 - dist) * 0.3
+                value = obs_dict.get(key, 0.0)
 
-        # penaliza demasiadas skills
-        score -= 0.05 * len(combo)
+                # simple norm
+                if isinstance(value, (list, np.ndarray)):
+                    value = np.linalg.norm(value)
+
+                score += value * weight * skill.order
 
         return score
     
@@ -123,28 +126,15 @@ class Cortex:
     def _score_skill_context(self, skill, obs_dict):
         score = 0.0
 
-        alignment = obs_dict.get("alignment", 0.0)
-        dist = obs_dict.get("dist", 1.0)
-        dist_norm = obs_dict.get("dist_norm", 1.0)
+        for inp in skill.inputs:
+            key = inp.get("key")
+            weight = inp.get("score", 0.0)
 
-        # -----------------------------------
-        # navegación
-        # -----------------------------------
-        if "goal" in skill.name:
-            score += (1 - dist) * 0.5
-            score += alignment * 0.5
+            value = obs_dict.get(key, 0.0)
 
-        # -----------------------------------
-        # evasión
-        # -----------------------------------
-        if "avoid" in skill.name:
-            score += (1 - dist_norm)
+            if isinstance(value, (list, np.ndarray)):
+                value = np.linalg.norm(value)
 
-        # -----------------------------------
-        # estabilidad
-        # -----------------------------------
-        if "stabilize" in skill.name:
-            rp = obs_dict.get("rp", [0, 0])
-            score += abs(rp[0]) + abs(rp[1])
+            score += value * weight
 
-        return score
+        return score * skill.order

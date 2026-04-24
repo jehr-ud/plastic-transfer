@@ -14,20 +14,22 @@ class StepLogger:
 
         # columns
         self.writer.writerow([
-            "step",
+            "steps",
             "episode",
-            "reward",
+            "episode_reward",
             "terminated",
-            "truncated"
+            "truncated",
+            "total_steps_with_skills"
         ])
 
-    def log(self, step, episode, reward, terminated, truncated):
+    def log(self, steps, episode, reward, terminated, truncated, total_steps_with_skills):
         self.writer.writerow([
-            step,
+            steps,
             episode,
             float(reward),
             int(terminated),
-            int(truncated)
+            int(truncated),
+            int(total_steps_with_skills)
         ])
 
     def close(self):

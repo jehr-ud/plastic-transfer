@@ -3,7 +3,6 @@ class Consolidation:
         self,
         basal,
         skill_library,
-        memory_bank,
         min_usage=5,
         min_score=-0.2,
         reinforce_factor=1.1,
@@ -12,7 +11,6 @@ class Consolidation:
     ):
         self.basal = basal
         self.skill_library = skill_library
-        self.memory_bank = memory_bank
 
         self.min_usage = min_usage
         self.min_score = min_score
@@ -29,7 +27,6 @@ class Consolidation:
         for skill in skills:
             name = skill.name
 
-            score = self.basal.get_skill_score(name)
             stats = self.basal.skill_stats.get(name, {})
 
             usage = stats.get("usage", 0)
@@ -55,7 +52,7 @@ class Consolidation:
         self._prune()
 
         # -------------------------
-        # 4. NORMALIZE (estabilidad)
+        # 4. NORMALIZE
         # -------------------------
         self._normalize()
 
@@ -76,7 +73,7 @@ class Consolidation:
 
             new_skills.append(skill)
 
-        # limitar tamaño
+        # size limit
         new_skills = sorted(
             new_skills,
             key=lambda s: self.basal.get_skill_score(s.name),

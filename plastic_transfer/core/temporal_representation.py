@@ -11,14 +11,12 @@ class TemporalRepresentation:
         encoder,
         window_size=32,
         step_size=1,
-        normalize=True,
-        observations_keys=[]
+        normalize=True
     ):
         self.encoder: Encoder = encoder # SNN Encoder
         self.window_size = window_size
         self.step_size = step_size
         self.normalize = normalize
-        self.observations_keys = observations_keys
 
         self.episode_buffer = []
 
@@ -98,7 +96,7 @@ class TemporalRepresentation:
         total_reward = rewards.sum()
         mean_reward = rewards.mean()
 
-        progress = rewards.sum()  # puedes mejorar luego
+        progress = rewards.sum()
 
         return {
             "total_reward": float(total_reward),
@@ -112,11 +110,11 @@ class TemporalRepresentation:
 
     def encode_current_step(self, obs, action, reward=0.0):
         """
-        Codifica usando una ventana deslizante del buffer actual.
-        No rompe el episodio, solo usa los últimos window_size pasos.
+        Encode using a sliding window of the current buffer.
+        It doesn't break the episode; it only uses the last window_size steps.
         """
 
-        # 1. add current step (sin modificar episodio aún)
+        # 1. add current step (without modifying episode yet)
         x = self._preprocess(obs, action, reward)
 
         temp_buffer = self.episode_buffer + [{"x": x}]

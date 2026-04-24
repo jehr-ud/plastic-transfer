@@ -1,8 +1,12 @@
 import numpy as np
 
-
 class ReusableAdaptation:
-    def __init__(self, basal, comparator=None, k=5):
+    def __init__(
+        self,
+        basal,
+        comparator=None,
+        k=5
+    ):
         self.comparator = comparator
         self.basal = basal
         self.k = k
@@ -12,74 +16,66 @@ class ReusableAdaptation:
     # -------------------------------
     def act(self, skills, obs, base_policy_fn, embedding=None, memory_bank=None):
         """
-        skills: lista de skills seleccionadas
-        obs: estado actual
-        base_policy_fn: función que genera acción base
-        embedding: opcional (para memoria)
-        memory_bank: opcional
+        Translate selected skills into final environment action.
         """
 
-        # 1. acción base por skills
-        base_action = self._compose_action(skills, obs, base_policy_fn)
+        action = self._compose_action(skills, obs, base_policy_fn)
 
-        # 2. refinamiento con memoria
+        # memory refinement
         if embedding is not None and memory_bank is not None and self.comparator:
-            base_action = self._adapt_with_memory(
+            action = self._adapt_with_memory_fast(
                 embedding,
-                base_action,
+                action,
                 memory_bank
             )
 
-        return base_action
+        return action
 
     # -------------------------------
-    # SKILL COMPOSITION
+    # SKILL COMPOSITION (FAST)
     # -------------------------------
     def _compose_action(self, skills, obs, base_policy_fn):
-        if not skills:
+        if not skills and base_policy_fn:
             return base_policy_fn(obs)
 
-        votes = []
-        weights = []
+        final_action = None
+        total_weight = 0.0
 
-        for sub_skill in skills:
-            action = sub_skill.act(obs)
+        for s in skills:
+            a = s.act(obs)
 
-            if action is None:
-                print("no action from skill calculating using policity")
-                action = base_policy_fn(obs)
+            if a is None and base_policy_fn:
+                a = base_policy_fn(obs)
 
-            weight = max(self._skill_weight(sub_skill), 0.0)
-            votes.append(action)
-            weights.append(weight)
+            w = max(self.basal.get_skill_score(s.name), 0.0)
 
-        weights = np.array(weights)
+            if final_action is None:
+                final_action = np.zeros_like(a)
 
-        if weights.sum() == 0:
-            return base_policy_fn(obs)
-
-        weights = weights / weights.sum()
-
-        final_action = np.zeros_like(votes[0])
-
-        for w, a in zip(weights, votes):
             final_action += w * a
+            total_weight += w
 
-        return final_action
+        if total_weight == 0.0:
+            return base_policy_fn(obs)
 
-    def _skill_weight(self, skill):
-        return self.basal.get_skill_score(skill.name)
+        return final_action / total_weight
 
     # -------------------------------
-    # MEMORY ADAPTATION
+    # MEMORY ADAPTATION (FAST)
     # -------------------------------
-    def _adapt_with_memory(self, current_emb, base_action, memory_bank):
+    def _adapt_with_memory_fast(self, current_emb, base_action, memory_bank):
+        """
+        Faster memory adaptation:
+        - avoids full sort
+        - early filtering
+        """
+
         memory = memory_bank.get_all()
-
         if not memory:
             return base_action
 
-        sims = []
+        best = []
+        min_sim = -np.inf
 
         for item in memory:
             emb = item.get("embedding")
@@ -89,19 +85,27 @@ class ReusableAdaptation:
                 continue
 
             sim = self.comparator.compare(current_emb, emb)
-            sims.append((sim, action_k))
 
-        if not sims:
+            if len(best) < self.k:
+                best.append((sim, action_k))
+                if sim < min_sim or min_sim == -np.inf:
+                    min_sim = sim
+            else:
+                if sim > min_sim:
+                    # replace worst
+                    worst_idx = np.argmin([b[0] for b in best])
+                    best[worst_idx] = (sim, action_k)
+                    min_sim = min([b[0] for b in best])
+
+        if not best:
             return base_action
 
-        sims.sort(key=lambda x: x[0], reverse=True)
-        top_k = sims[:self.k]
+        sims = np.array([s for s, _ in best])
+        weights = sims / (sims.sum() + 1e-8)
 
-        weights = np.array([s for s, _ in top_k])
-        weights = weights / (weights.sum() + 1e-8)
+        delta = np.zeros_like(base_action)
 
-        delta = 0
-        for w, (_, action_k) in zip(weights, top_k):
-            delta += w * (action_k - base_action)
+        for w, (_, a_k) in zip(weights, best):
+            delta += w * (a_k - base_action)
 
         return base_action + delta

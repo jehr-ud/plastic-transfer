@@ -92,12 +92,10 @@ def test_reuses_skill():
     pt = PlasticTransfer(
         env=env,
         model_builder=mock_model_builder,
-        input_size=3,
         hidden_size=8,
         latent_size=4,
         process_interval=10,
-        skill_train_steps=5,
-        novelty_threshold=-1.0  # fuerza reuse
+        skill_train_steps=5
     )
 
     pt.learn(total_steps=100)
@@ -111,7 +109,6 @@ def test_memory_bank_updates():
     pt = PlasticTransfer(
         env=env,
         model_builder=mock_model_builder,
-        input_size=3,
         hidden_size=8,
         latent_size=4,
         process_interval=10,

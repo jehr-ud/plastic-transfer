@@ -1,9 +1,10 @@
 import os
 import json
+from collections import deque
+
 import torch
 import numpy as np
 
-from plastic_transfer.core.trajectory_store import TrajectoryStore
 from plastic_transfer.core.temporal_representation import TemporalRepresentation
 from plastic_transfer.core.structural_comparison import StructuralComparison
 from plastic_transfer.core.reusable_adaptation import ReusableAdaptation
@@ -12,19 +13,16 @@ from plastic_transfer.core.cortex import Cortex
 from plastic_transfer.core.basal import BasalGanglia
 from plastic_transfer.core.learning_definitions import LearningDefinitions
 from plastic_transfer.core.consolidation import Consolidation
-
-
+from plastic_transfer.core.builders.base_policy_builder import BasePolicyBuilder
+from plastic_transfer.skills.skill import Skill
+from plastic_transfer.skills.skill_library import SkillLibrary
+from plastic_transfer.memory.memory_bank import MemoryBank
 from plastic_transfer.utils.general import (
-    validate_trigger, serialize_memory
+    validate_trigger,
+    serialize_memory
 )
 from plastic_transfer.utils.step_logger import StepLogger
 from plastic_transfer.utils.gym import get_action_dim, get_obs_dim
-
-from plastic_transfer.skills.skill import Skill
-from plastic_transfer.skills.skill_library import SkillLibrary
-
-from plastic_transfer.memory.memory_bank import MemoryBank
-
 
 
 class PlasticTransfer:
@@ -34,19 +32,22 @@ class PlasticTransfer:
         model_builder,
         hidden_size,
         latent_size,
-        observations_keys,
         learning_definitions,
-        logger_path_file="plastic",
+        logger_path_file=None,
         obs_to_dict_fn=None,
-        base_policy_fn=None,
-        debug=True,
+        policy_config={},
+        debug=False,
         skill_train_steps=20000,
-        novelty_threshold=0.3
     ):
         self.env = env
         self.model_builder = model_builder
         self.obs_to_dict_fn = obs_to_dict_fn
-        self.base_policy_fn = base_policy_fn
+
+        self.policy_config = policy_config
+        builder = BasePolicyBuilder(policy_config)
+        self.base_policy_fn = builder.build()
+
+
         self.debug = debug
 
         # DIMENSIONS
@@ -67,10 +68,8 @@ class PlasticTransfer:
             latent_size
         )
         self.temporal = TemporalRepresentation(
-            encoder=encoder,
-            observations_keys=observations_keys
+            encoder=encoder
         )
-        self.trajectory_store = TrajectoryStore()
         self.basal = BasalGanglia()
         self.structural_comparison = StructuralComparison()
         self.skill_library = SkillLibrary()
@@ -84,18 +83,19 @@ class PlasticTransfer:
         self.adapter = ReusableAdaptation(basal=self.basal, comparator=self.structural_comparison)
         self.consolidation = Consolidation(
             basal=self.basal,
-            skill_library=self.skill_library,
-            memory_bank=self.memory_bank,
+            skill_library=self.skill_library
         )
 
         # -------------------------------
-        # Utils
+        # Logger
         # -------------------------------
 
-        self.logger = StepLogger(name=logger_path_file)
+        self.logger = None
+        if logger_path_file:
+            self.logger = StepLogger(name=logger_path_file)
 
         # -------------------------------
-        # Skills
+        # Skills firts creation
         # -------------------------------
 
         validate_trigger_fn = None
@@ -120,14 +120,12 @@ class PlasticTransfer:
         print(f"[PT] Loaded {len(self.learning_definitions.get_skills())} skills")
 
         # -------------------------------
-        # Config
-        self.skill_train_steps = skill_train_steps
-        self.novelty_threshold = novelty_threshold
-
         # Stats
+        self.skill_train_steps = skill_train_steps
+        self.total_episodes = 0
         self.total_steps = 0
-        self.episode = 0
-        
+        self.recent_rewards = deque(maxlen=100)
+        self.recent_success = deque(maxlen=100)
 
     # =========================================================
     # MAIN TRAIN LOOP
@@ -135,183 +133,187 @@ class PlasticTransfer:
     def learn(self, total_steps=100_000):
         obs, _ = self.env.reset()
 
+        accumulated_reward = 0
+        total_steps_in_episode = 0
+        self.total_steps = 0
+        self.total_steps_with_skills = 0
+        self.total_episodes = 0
+
         for step in range(total_steps):
-            self.total_steps += 1
-
             done = False
-            accumulated_reward = 0
-            n_steps = 0
 
-            # acción inicial
+            # initial action
             last_action = self.env.action_space.sample()
 
-            self._debug(f"\n=== Episode {self.episode} ===")
-
-            while not done:
-                n_steps += 1
-
-                # -----------------------------------
-                # 1. TEMPORAL ENCODING
-                # -----------------------------------
-                encoding_z = self.temporal.encode_current_step(
-                    obs, action=last_action, reward=0.0
-                )
-
-                if encoding_z is not None:
-                    self._debug(f"[ENC] z norm={np.linalg.norm(encoding_z):.3f}")
-                else:
-                    self._debug("[ENC] z=None (warming buffer)")
-
-                use_skills = (
-                    encoding_z is not None and
-                    np.random.rand() < self.novelty_threshold
-                )
-
-                self._debug(f"[MODE] use_skills={use_skills}")
-
-                selected = None
-
-                # -----------------------------------
-                # 2. ACTION SELECTION
-                # -----------------------------------
-                if use_skills:
-                    obs_dict = self.obs_to_dict_fn(obs)
-
-                    candidates = self.cortex.propose(
-                        encoding_z, obs_dict
-                    )
-
-                    self._debug(f"[CORTEX] candidates={len(candidates)}")
-
-                    for i, c in enumerate(candidates[:3]):
-                        names = [s.name for s in c["skills"]]
-                        self._debug(f"  cand[{i}] score={c['score']:.3f} skills={names}")
-
-                    selected = self.basal.select(candidates, obs_dict)
-
-                    if selected is not None:
-                        names = [s.name for s in selected["skills"]]
-                        self._debug(f"[BASAL] selected={names}")
-
-                        action = self.adapter.act(
-                            skills=selected["skills"],
-                            obs=obs,
-                            base_policy_fn=self.base_policy_fn,
-                            embedding=encoding_z,
-                            memory_bank=self.memory_bank
-                        )
-                    else:
-                        self._debug("[BASAL] selected=None → random fallback")
-                        action = self.env.action_space.sample()
-
-                else:
-                    action = self.env.action_space.sample()
-
-                self._debug(f"[ACT] action={np.round(action, 3)}")
-
-                last_action = action
-
-                assert action.shape[0] == self.env.action_space.shape[0], f"Invalid action dim: {action.shape}"
-
-                # -----------------------------------
-                # 3. ENV STEP
-                # -----------------------------------
-                next_obs, reward, terminated, truncated, info = self.env.step(action)
-                done = terminated or truncated
-
-                accumulated_reward += reward
-
-                self._debug(f"[REWARD] r={reward:.3f} acc={accumulated_reward:.3f}")
-
-                # -----------------------------------
-                # 4. SKILL EXPERIENCE (AFTER REWARD)
-                # -----------------------------------
-                if selected is not None:
-                    obs_dict = self.obs_to_dict_fn(obs)
-
-                    shaped_reward = reward + 0.5 * obs_dict.get("alignment", 0.0)
-
-                    for sub_skill in selected["skills"]:
-                        sub_skill.store(obs, action, shaped_reward)
-
-                # -----------------------------------
-                # 5. TEMPORAL UPDATE
-                # -----------------------------------
-                self.temporal.add_step(obs, action, reward)
-
-                # -----------------------------------
-                # 6. BASAL UPDATE
-                # -----------------------------------
-                if selected is not None:
-                    next_obs_dict = self.obs_to_dict_fn(next_obs)
-
-                    self.basal.update(
-                        selected,
-                        reward,
-                        next_obs_dict,
-                        done
-                    )
-
-                    for s in selected["skills"]:
-                        w = self.basal.get_skill_score(s.name)
-                        self._debug(f"[BASAL-UPD] {s.name} weight={w:.3f}")
-
-                # -----------------------------------
-                # 7. GLOBAL STORAGE
-                # -----------------------------------
-                self.trajectory_store.add(obs, action, reward)
-
-                obs = next_obs
-
-                # -----------------------------------
-                # 8. END EPISODE
-                # -----------------------------------
-                if done:
-                    self._debug("\n[EPISODE END]")
-                    self._debug(f"steps={n_steps}")
-                    self._debug(f"total_reward={accumulated_reward:.3f}")
-                    self._debug(f"terminated={terminated}, truncated={truncated}")
-
-                    result = self.temporal.end_episode(terminated, truncated)
-
-                    if result:
-                        embeddings = result["embeddings"]
-                        metrics = result["metrics"]
-
-                        self.memory_bank.add(
-                            embedding=embeddings[-1] if embeddings else None,
-                            reward=metrics["total_reward"],
-                            skills=selected["skills"] if selected else []
-                        )
-
-                        self._debug(
-                            f"[MEMORY] stored | reward={metrics['total_reward']:.3f}"
-                        )
-
-                    # -----------------------------------
-                    # CONSOLIDATION
-                    # -----------------------------------
-                    if self.episode % 10 == 0:
-                        self._debug("\n[CONSOLIDATION RUN]")
-
-                        self.consolidation.run()
-
-                        for skill in self.skill_library.get_all():
-                            skill.train(steps=self.skill_train_steps)
-
-                    obs, _ = self.env.reset()
-                    self.episode += 1
+            self._debug(f"\n=== Episode {self.total_episodes} ===")
 
             # -----------------------------------
-            # LOGGING
+            # 1. TEMPORAL ENCODING
             # -----------------------------------
-            self.logger.log(
-                step=self.total_steps,
-                episode=self.episode,
-                reward=accumulated_reward / max(n_steps, 1),
-                terminated=terminated,
-                truncated=truncated
+            encoding_z = self.temporal.encode_current_step(
+                obs, action=last_action, reward=0.0
             )
+
+            if encoding_z is not None:
+                self._debug(f"[ENC] z norm={np.linalg.norm(encoding_z):.3f}")
+            else:
+                self._debug("[ENC] z=None (warming buffer)")
+
+            use_skills = False
+
+            if encoding_z is not None and len(self.recent_rewards) >= 10:
+
+                rewards = np.array(self.recent_rewards)
+
+                stability = np.std(rewards)
+                stability_norm = np.clip(stability / 1.0, 0.0, 1.0)
+
+                trend = np.mean(rewards[-10:]) - np.mean(rewards[:10])
+                trend_norm = (np.tanh(trend) + 1) / 2  # [0,1]
+
+                skill_prob = 0.5 * (1 - stability_norm) + 0.5 * trend_norm
+                skill_prob = np.clip(skill_prob, 0.2, 0.9)
+
+                use_skills = np.random.rand() < skill_prob
+
+            self._debug(f"[MODE] use_skills={use_skills}")
+
+            selected = None
+
+            # -----------------------------------
+            # 2. ACTION SELECTION
+            # -----------------------------------
+            if use_skills:
+                obs_dict = self.obs_to_dict_fn(obs)
+
+                candidates = self.cortex.propose(
+                    encoding_z, obs_dict
+                )
+
+                self._debug(f"[CORTEX] candidates={len(candidates)}")
+
+                if candidates:
+                    c = candidates[0]
+                    self._debug(f"[CORTEX] best score={c['score']:.3f} skills={[s.name for s in c['skills']]}")
+
+                selected = self.basal.select(candidates)
+
+                if selected is not None:
+                    names = [s.name for s in selected["skills"]]
+                    self._debug(f"[BASAL] selected={names}")
+
+                    action = self.adapter.act(
+                        skills=selected["skills"],
+                        obs=obs,
+                        base_policy_fn=self.base_policy_fn,
+                        embedding=encoding_z,
+                        memory_bank=self.memory_bank
+                    )
+
+                    self.total_steps_with_skills += 1
+
+                else:
+                    self._debug("[BASAL] selected=None → random fallback")
+                    action = self.base_policy_fn(obs)
+
+            else:
+                action = self.base_policy_fn(obs)
+
+            self._debug(f"[ACT] action={np.round(action, 3)}")
+
+            last_action = action
+
+            assert action.shape[0] == self.env.action_space.shape[0], f"Invalid action dim: {action.shape}"
+
+            # -----------------------------------
+            # 3. ENV STEP
+            # -----------------------------------
+            next_obs, reward, terminated, truncated, info = self.env.step(action)
+            done = terminated or truncated
+
+            accumulated_reward += reward
+            total_steps_in_episode += 1
+            self.recent_rewards.append(reward)
+            self.recent_success.append(1 if terminated else 0)
+
+            self._debug(f"[REWARD] r={reward:.3f} acc={accumulated_reward:.3f}")
+
+
+            # -----------------------------------
+            # 4. TEMPORAL UPDATE
+            # -----------------------------------
+            self.temporal.add_step(obs, action, reward)
+
+            # -----------------------------------
+            # 5. BASAL UPDATE
+            # -----------------------------------
+            if selected is not None:
+                self.basal.update(
+                    reward,
+                    done
+                )
+                    
+                for skill in selected["skills"]:
+                    skill.train(total_steps=self.skill_train_steps // len(selected["skills"]))
+
+            obs = next_obs
+
+            # -----------------------------------
+            # 6. END EPISODE
+            # -----------------------------------
+            if done:
+                self._debug("\n[EPISODE END]")
+                self._debug(f"steps={total_steps_in_episode}")
+                self._debug(f"total_reward={accumulated_reward:.3f}")
+                self._debug(f"terminated={terminated}, truncated={truncated}")
+
+                result = self.temporal.end_episode(terminated, truncated)
+
+                if result:
+                    embeddings = result["embeddings"]
+                    metrics = result["metrics"]
+
+                    self.memory_bank.add(
+                        action=action,
+                        embedding=embeddings[-1] if embeddings else None,
+                        reward=metrics["total_reward"],
+                        skills=selected["skills"] if selected else []
+                    )
+
+                    self._debug(
+                        f"[MEMORY] stored | reward={metrics['total_reward']:.3f}"
+                    )
+
+                # -----------------------------------
+                # CONSOLIDATION
+                # -----------------------------------
+                if self.total_episodes % (total_steps // 10) == 0:
+                    self._debug("\n[CONSOLIDATION RUN]")
+
+                    self.consolidation.run()
+
+                obs, _ = self.env.reset()
+
+                # -----------------------------------
+                # LOGGING
+                # -----------------------------------
+
+                if self.logger:
+                    self.logger.log(
+                        steps=total_steps_in_episode,
+                        episode=self.total_episodes,
+                        reward=accumulated_reward,
+                        terminated=terminated,
+                        truncated=truncated,
+                        total_steps_with_skills=self.total_steps_with_skills
+                    )
+            
+                self.total_episodes += 1
+                accumulated_reward = 0
+                total_steps_in_episode = 0
+                self.total_steps_with_skills = 0
+
+        self.total_steps = total_steps
 
         self.logger.close()
 
@@ -334,8 +336,6 @@ class PlasticTransfer:
         # -----------------------------------
         # 2. obs dict
         # -----------------------------------
-        obs_dict = self.obs_to_dict_fn(obs) if self.obs_to_dict_fn else {}
-
         use_skills = z is not None
 
         selected = None
@@ -351,7 +351,7 @@ class PlasticTransfer:
                 self.memory_bank
             )
 
-            selected = self.basal.select(candidates, obs_dict)
+            selected = self.basal.select(candidates)
 
         # -----------------------------------
         # 4. action
@@ -365,8 +365,11 @@ class PlasticTransfer:
                 memory_bank=self.memory_bank
             )
         else:
-            # fallback seguro
-            action = self.base_policy_fn(obs)
+            # fallback
+            if self.base_policy_fn:
+                action = self.base_policy_fn(obs)
+            else:
+                action = self.env.action_space.sample()
 
         return action
 
@@ -381,7 +384,7 @@ class PlasticTransfer:
         return {
             "num_skills": len(self.skill_library.skills),
             "total_steps": self.total_steps,
-            "episodes": self.episode
+            "episodes": self.total_episodes
         }
 
     def save(self, path):
@@ -396,7 +399,7 @@ class PlasticTransfer:
         )
 
         # -------------------------
-        # 2. Skills (model + metadata)
+        # 2. Skills (model)
         # -------------------------
         skills_data = []
 
@@ -444,11 +447,23 @@ class PlasticTransfer:
         # -------------------------
         config = {
             "total_steps": self.total_steps,
-            "episode": self.episode
+            "episode": self.total_episodes
         }
 
         with open(f"{path}/config.json", "w") as f:
             json.dump(config, f)
+
+        # -------------------------
+        # 5. funcition base 
+        # -------------------------
+
+        config = {
+            "policy_config": self.policy_config,
+        }
+
+        with open(f"{path}/policy_base_config.json", "w") as f:
+            json.dump(config, f)
+
 
         print(f"[PT] Model saved at {path}")
 
@@ -494,13 +509,13 @@ class PlasticTransfer:
             self.skill_library.add(skill)
 
         # -------------------------
-        # 3. Index (IMPORTANTE 🔥)
+        # 3. Index
         # -------------------------
         if hasattr(self.skill_library, "build_index"):
             self.skill_library.build_index()
 
         # -------------------------
-        # 4. Memory (DESPUÉS de skills 🔥)
+        # 4. Memory
         # -------------------------
         memory_path = f"{path}/memory.json"
 
@@ -549,7 +564,19 @@ class PlasticTransfer:
                 config = json.load(f)
 
             self.total_steps = config.get("total_steps", 0)
-            self.episode = config.get("episode", 0)
+            self.total_episodes = config.get("episode", 0)
+
+        # -------------------------
+        # 6. Policy base
+        # -------------------------
+        config_path = f"{path}/policy_base_config.json"
+
+        if os.path.exists(config_path):
+            with open(config_path) as f:
+                config = json.load(f)
+
+                builder = BasePolicyBuilder(config.get("policy_config"))
+                self.base_policy_fn = builder.build()
 
         # -------------------------
         # 7. Debug

@@ -9,7 +9,7 @@ class MemoryBank:
     # -------------------------------
     # ADD
     # -------------------------------
-    def add(self, embedding, action=None, reward=0.0, skills=None, metadata=None):
+    def add(self, embedding, action=None, reward=0.0, skills=None):
         if embedding is None:
             return
 
@@ -17,8 +17,7 @@ class MemoryBank:
             "embedding": embedding,
             "action": action,
             "reward": reward,
-            "skills": skills or [],
-            "metadata": metadata or {}
+            "skills": skills or []
         }
 
         self.data.append(item)
@@ -51,8 +50,7 @@ class MemoryBank:
                     "embedding": item["embedding"],
                     "action": item["action"],
                     "reward": item["reward"],
-                    "skills": item["skills"],
-                    "metadata": item["metadata"]
+                    "skills": item["skills"]
                 })
 
         # order by similarity
